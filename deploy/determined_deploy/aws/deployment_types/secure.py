@@ -9,14 +9,14 @@ from determined_deploy.aws.deployment_types import base
 
 class Secure(base.DeterminedDeployment):
     ssh_command = (
-        "SSH to Determined Master: ssh -i  <keypair> ubuntu@{master_ip} -o "
-        '"proxycommand ssh -W %h:%p -i <keypair> ubuntu@{bastion_ip}"'
+        "SSH to Determined Master: ssh -i  <({keypair})'s private key> ubuntu@{master_ip} -o "
+        '"proxycommand ssh -W %h:%p -i <({keypair})s private key> ubuntu@{bastion_ip}"'
     )
     det_ui = (
         "To View Determined UI:\n"
         "Add Keypair: ssh-add <keypair>\n"
         "Open SSH Tunnel through Bastion:  ssh -N -L 8080:{master_ip}:8080 ubuntu@{bastion_ip}\n"
-        "Access Determined through CLI: det -m localhost:8080\n"
+        "Configure the Determined CLI: export DET_MASTER=localhost:8080\n"
         "View the Determined UI: http://localhost:8080\n"
         "View Logs at: https://{region}.console.aws.amazon.com/cloudwatch/home?"
         "region={region}#logStream:group={log_group}"
@@ -43,6 +43,7 @@ class Secure(base.DeterminedDeployment):
         super().__init__(template_path, parameters)
 
     def deploy(self) -> None:
+        self.before_deploy_print()
         cfn_parameters = self.consolidate_parameters()
         with open(self.template_path) as f:
             template = f.read()
@@ -50,15 +51,19 @@ class Secure(base.DeterminedDeployment):
         aws.deploy_stack(
             stack_name=self.parameters[constants.cloudformation.CLUSTER_ID],
             template_body=template,
+            keypair=self.parameters[constants.cloudformation.KEYPAIR],
             boto3_session=self.parameters[constants.cloudformation.BOTO3_SESSION],
             parameters=cfn_parameters,
         )
         self.print_results(
             self.parameters[constants.cloudformation.CLUSTER_ID],
+            self.parameters[constants.cloudformation.KEYPAIR],
             self.parameters[constants.cloudformation.BOTO3_SESSION],
         )
 
-    def print_results(self, stack_name: str, boto3_session: boto3.session.Session) -> None:
+    def print_results(
+        self, stack_name: str, keypair: str, boto3_session: boto3.session.Session
+    ) -> None:
         output = aws.get_output(stack_name, boto3_session)
 
         bastion_ip = aws.get_ec2_info(output["BastionId"], boto3_session)[
@@ -77,7 +82,7 @@ class Secure(base.DeterminedDeployment):
         print()
 
         ssh_command = self.ssh_command.format(
-            master_ip=master_ip.split(":")[0], bastion_ip=bastion_ip
+            master_ip=master_ip.split(":")[0], bastion_ip=bastion_ip, keypair=keypair
         )
         print(ssh_command)
         print()
