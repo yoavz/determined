@@ -14,7 +14,12 @@ from torch import nn
 from torchvision import transforms
 
 import determined as det
-from determined.pytorch import DataLoader, PyTorchTrial, reset_parameters
+from determined.pytorch import (
+    DataLoader,
+    PyTorchTrial,
+    reset_parameters,
+    PyTorchCallback,
+)
 
 # Constants about the data set.
 IMAGE_SIZE = 32
@@ -26,11 +31,14 @@ TorchData = Union[Dict[str, torch.Tensor], Sequence[torch.Tensor], torch.Tensor]
 
 def accuracy_rate(predictions: torch.Tensor, labels: torch.Tensor) -> float:
     """Return the accuracy rate based on dense predictions and sparse labels."""
-    assert len(predictions) == len(labels), "Predictions and labels must have the same length."
+    assert len(predictions) == len(
+        labels
+    ), "Predictions and labels must have the same length."
     assert len(labels.shape) == 1, "Labels must be a column vector."
 
     return (  # type: ignore
-        float((predictions.argmax(1) == labels.to(torch.long)).sum()) / predictions.shape[0]
+        float((predictions.argmax(1) == labels.to(torch.long)).sum())
+        / predictions.shape[0]
     )
 
 
@@ -40,6 +48,22 @@ class Flatten(nn.Module):
         x = args[0]
         assert isinstance(x, torch.Tensor)
         return x.view(x.size(0), -1)
+
+
+class ReduceLROnPlateauEveryValidationStep(PyTorchCallback):
+    def __init__(self, context):
+        self.reduce_lr = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            context.get_optimizer(), "min", verbose=True
+        )
+
+    def on_validation_step_end(self, metrics: Dict[str, Any]) -> None:
+        self.reduce_lr.step(metrics["validation_error"])
+
+    def state_dict(self) -> Dict[str, Any]:
+        return self.reduce_lr.state_dict()
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        self.reduce_lr.load_state_dict(state_dict)
 
 
 class CIFARTrial(PyTorchTrial):
@@ -76,11 +100,8 @@ class CIFARTrial(PyTorchTrial):
         return model
 
     def optimizer(self, model: nn.Module) -> torch.optim.Optimizer:  # type: ignore
-        return torch.optim.RMSprop(  # type: ignore
-            model.parameters(),
-            lr=self.context.get_hparam("learning_rate"),
-            weight_decay=self.context.get_hparam("learning_rate_decay"),
-            alpha=0.9,
+        return torch.optim.Adam(  # type: ignore
+            model.parameters(), lr=self.context.get_hparam("learning_rate")
         )
 
     def train_batch(
@@ -92,7 +113,16 @@ class CIFARTrial(PyTorchTrial):
         output = model(data)
         loss = torch.nn.functional.cross_entropy(output, labels)
         accuracy = accuracy_rate(output, labels)
-        return {"loss": loss, "train_error": 1.0 - accuracy, "train_accuracy": accuracy}
+
+        for g in self.context.get_optimizer().param_groups:
+            lr = g["lr"]
+
+        return {
+            "loss": loss,
+            "train_error": 1.0 - accuracy,
+            "train_accuracy": accuracy,
+            "lr": lr,
+        }
 
     def evaluate_batch(self, batch: TorchData, model: nn.Module) -> Dict[str, Any]:
         """
@@ -108,7 +138,10 @@ class CIFARTrial(PyTorchTrial):
 
     def build_training_data_loader(self) -> Any:
         transform = transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+            [
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
         )
         trainset = torchvision.datasets.CIFAR10(
             root=self.download_directory, train=True, download=True, transform=transform
@@ -117,10 +150,19 @@ class CIFARTrial(PyTorchTrial):
 
     def build_validation_data_loader(self) -> Any:
         transform = transforms.Compose(
-            [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+            [
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+            ]
         )
         valset = torchvision.datasets.CIFAR10(
-            root=self.download_directory, train=False, download=True, transform=transform
+            root=self.download_directory,
+            train=False,
+            download=True,
+            transform=transform,
         )
 
         return DataLoader(valset, batch_size=self.context.get_per_slot_batch_size())
+
+    def build_callbacks(self) -> Any:
+        return {"reduce_lr": ReduceLROnPlateauEveryValidationStep(self.context)}
